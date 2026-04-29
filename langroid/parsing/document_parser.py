@@ -45,6 +45,10 @@ class DocumentType(str, Enum):
     XLSX = "xlsx"
     XLS = "xls"
     PPTX = "pptx"
+    PNG = "png"
+    JPG = "jpg"
+    JPEG = "jpeg"
+    IMAGE = "image"
 
 
 def find_last_full_char(possible_unicode: bytes) -> int:
@@ -176,6 +180,8 @@ class DocumentParser(Parser):
             return MarkitdownXLSXParser(source, config)
         elif inferred_doc_type == DocumentType.PPTX:
             return MarkitdownPPTXParser(source, config)
+        elif inferred_doc_type in [DocumentType.PNG, DocumentType.JPG, DocumentType.JPEG, DocumentType.IMAGE]:
+            return ImageParser(source, config)
         else:
             source_name = source if isinstance(source, str) else "bytes"
             raise ValueError(f"Unsupported document type: {source_name}")
@@ -230,6 +236,12 @@ class DocumentParser(Parser):
                 return DocumentType.XLS
             elif source.lower().endswith(".pptx"):
                 return DocumentType.PPTX
+            elif source.lower().endswith(".png"):
+                return DocumentType.PNG
+            elif source.lower().endswith(".jpg"):
+                return DocumentType.JPG
+            elif source.lower().endswith(".jpeg"):
+                return DocumentType.JPEG
             else:
                 raise ValueError(f"Unsupported document type: {source}")
         else:
@@ -254,6 +266,8 @@ class DocumentParser(Parser):
                 return DocumentType.XLSX
             elif mime_type == "application/vnd.ms-excel":
                 return DocumentType.XLS
+            elif mime_type.startswith("image/"):
+                return DocumentType.IMAGE
             else:
                 raise ValueError("Unsupported document type from bytes")
 
@@ -299,6 +313,10 @@ class DocumentParser(Parser):
             DocumentType.PPTX,
             DocumentType.XLS,
             DocumentType.XLSX,
+            DocumentType.PNG,
+            DocumentType.JPG,
+            DocumentType.JPEG,
+            DocumentType.IMAGE,
         ]:
             doc_parser = DocumentParser.create(
                 source,
@@ -694,7 +712,68 @@ class ImagePdfParser(DocumentParser):
         )
 
 
-class UnstructuredPDFParser(DocumentParser):
+class ImageParser(DocumentParser):
+    """
+    Parser for processing image files (PNG, JPG, JPEG) using OCR.
+    Supports multi-modal RAG agents with vision-language models.
+    """
+
+    def __init__(self, source: str | bytes, config: ParsingConfig, use_ocr: bool = True):
+        super().__init__(source, config)
+        self.use_ocr = use_ocr
+
+    def iterate_pages(self) -> Generator[Tuple[int, "Image"], None, None]:  # type: ignore
+        try:
+            from PIL import Image
+        except ImportError:
+            raise LangroidImportError("PIL", "pdf-parsers")
+
+        if isinstance(self.doc_bytes, bytes):
+            image = Image.open(BytesIO(self.doc_bytes))
+        else:
+            image = Image.open(self.doc_bytes)
+        yield 0, image
+
+    def get_document_from_page(self, page: "Image") -> Document:  # type: ignore
+        """
+        Get Document object from an image file.
+        For multi-modal models (like bakllava, LLaVA), the image content
+        can be processed directly by the vision-language model.
+        For text-only models, use OCR to extract text.
+
+        Args:
+            page (Image): The PIL Image object.
+
+        Returns:
+            Document: Document object with OCR-extracted text or placeholder.
+        """
+        if self.use_ocr:
+            try:
+                import pytesseract
+            except ImportError:
+                raise LangroidImportError("pytesseract", "pdf-parsers")
+            text = pytesseract.image_to_string(page)
+        else:
+            # For multi-modal models, we store a placeholder
+            # The actual image is passed separately to the vision model
+            text = f"[IMAGE: {self.source}]"
+
+        return Document(
+            content=self.fix_text(text),
+            metadata=DocMetaData(source=self.source),
+        )
+
+    def get_image_bytes(self) -> bytes:
+        """Return the raw image bytes for multi-modal model processing."""
+        if isinstance(self.doc_bytes, bytes):
+            return self.doc_bytes
+        self.doc_bytes.seek(0)
+        return self.doc_bytes.read()
+
+    def get_image_base64(self) -> str:
+        """Return base64-encoded image for API calls."""
+        import base64
+        return base64.b64encode(self.get_image_bytes()).decode("utf-8")
     """
     Parser for processing PDF files using the `unstructured` library.
     """
